@@ -1,0 +1,164 @@
+"""
+Advanced Time Series Forecasting with LSTM + Attention
+Baseline Comparison: ARIMA
+Author: Kalai Arasan
+"""
+
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+from statsmodels.tsa.arima.model import ARIMA
+
+# -------------------------------
+# Data Generation
+# -------------------------------
+def generate_synthetic_data(n_steps=2000):
+    """
+    Generate multivariate synthetic time series data.
+
+    Returns
+    -------
+    np.ndarray
+        Shape (n_steps, 3)
+    """
+    t = np.arange(n_steps)
+    s1 = np.sin(0.02 * t) + 0.3 * np.random.randn(n_steps)
+    s2 = np.cos(0.015 * t) + 0.3 * np.random.randn(n_steps)
+    s3 = 0.5 * s1 + 0.2 * s2 + 0.2 * np.random.randn(n_steps)
+    return np.vstack([s1, s2, s3]).T
+
+
+def create_sequences(data, window=30, horizon=1):
+    X, y = [], []
+    for i in range(len(data) - window - horizon):
+        X.append(data[i:i + window])
+        y.append(data[i + window:i + window + horizon, 0])
+    return np.array(X), np.array(y)
+
+
+# -------------------------------
+# Attention Model
+# -------------------------------
+class Attention(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.attn = nn.Linear(hidden_dim, 1)
+
+    def forward(self, lstm_out):
+        weights = torch.softmax(self.attn(lstm_out), dim=1)
+        context = torch.sum(weights * lstm_out, dim=1)
+        return context, weights
+
+
+class LSTMAttentionModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim=64):
+        super().__init__()
+        self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True)
+        self.attention = Attention(hidden_dim)
+        self.fc = nn.Linear(hidden_dim, 1)
+
+    def forward(self, x):
+        lstm_out, _ = self.lstm(x)
+        context, attn_weights = self.attention(lstm_out)
+        output = self.fc(context)
+        return output, attn_weights
+
+
+# -------------------------------
+# Train Function
+# -------------------------------
+def train_model(model, dataloader, epochs=20, lr=0.001):
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    loss_fn = nn.MSELoss()
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0
+        for X, y in dataloader:
+            optimizer.zero_grad()
+            preds, _ = model(X)
+            loss = loss_fn(preds.squeeze(), y.squeeze())
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        print(f"Epoch {epoch+1}/{epochs} - Loss: {total_loss/len(dataloader):.4f}")
+
+
+# -------------------------------
+# Evaluation
+# -------------------------------
+def evaluate(y_true, y_pred):
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    mae = mean_absolute_error(y_true, y_pred)
+    return rmse, mae
+
+
+# -------------------------------
+# ARIMA Baseline
+# -------------------------------
+def arima_baseline(series, train_size):
+    train, test = series[:train_size], series[train_size:]
+    model = ARIMA(train, order=(2, 1, 2))
+    model_fit = model.fit()
+    forecast = model_fit.forecast(steps=len(test))
+    return test, forecast
+
+
+# -------------------------------
+# Main Execution
+# -------------------------------
+if __name__ == "__main__":
+
+    # Generate and scale data
+    raw_data = generate_synthetic_data()
+    scaler = MinMaxScaler()
+    scaled_data = scaler.fit_transform(raw_data)
+
+    # Create sequences
+    X, y = create_sequences(scaled_data)
+
+    # Train-test split (rolling friendly)
+    X_train, y_train = X[:1500], y[:1500]
+    X_test, y_test = X[1500:], y[1500:]
+
+    train_loader = DataLoader(
+        TensorDataset(
+            torch.tensor(X_train, dtype=torch.float32),
+            torch.tensor(y_train, dtype=torch.float32)
+        ),
+        batch_size=32,
+        shuffle=True
+    )
+
+    # Model
+    model = LSTMAttentionModel(input_dim=3)
+    train_model(model, train_loader)
+
+    # Deep Learning Evaluation
+    model.eval()
+    with torch.no_grad():
+        preds, attn_weights = model(torch.tensor(X_test, dtype=torch.float32))
+
+    rmse_dl, mae_dl = evaluate(
+        y_test.flatten(),
+        preds.numpy().flatten()
+    )
+
+    print("\nLSTM + Attention Results")
+    print("RMSE:", rmse_dl)
+    print("MAE :", mae_dl)
+
+    # Baseline Evaluation
+    true, forecast = arima_baseline(raw_data[:, 0], 1500)
+    rmse_arima, mae_arima = evaluate(true, forecast)
+
+    print("\nARIMA Baseline Results")
+    print("RMSE:", rmse_arima)
+    print("MAE :", mae_arima)
+
+    # Final Comparison
+    print("\nPerformance Comparison")
+    print("Deep Learning better than ARIMA:", rmse_dl < rmse_arima)
